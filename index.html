@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ระบบจัดการกระบวนการคำสั่งซื้อ (Order Workflow Management System - Firebase Auth & Firestore)</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- FontAwesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+  <!-- Google Fonts Prompt -->
+  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  
+  <!-- Firebase SDK Modules -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.10.0/firebase-app.js";
+    import { 
+      getAuth, 
+      signInWithEmailAndPassword, 
+      createUserWithEmailAndPassword, 
+      signOut, 
+      onAuthStateChanged 
+    } from "https://www.gstatic.com/firebasejs/10.10.0/firebase-auth.js";
+    import { 
+      getFirestore, 
+      collection, 
+      doc, 
+      setDoc, 
+      getDoc, 
+      updateDoc, 
+      onSnapshot, 
+      query, 
+      orderBy, 
+      serverTimestamp 
+    } from "https://www.gstatic.com/firebasejs/10.10.0/firebase-firestore.js";
+
+    // 📌 นำค่า firebaseConfig จาก Firebase Console มาใส่ตรงนี้
+    const firebaseConfig = {
+      apiKey: "AIzaSyBqKheheNFQsHCJRkfoBQ_aR7BfHXgLGpY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      projectId: "order-workflow-system",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "643889440663",
+      appId: "1:643889440663:web:4b1c96081b1b83d2de06d2"
+    };
+
+    let app, auth, db;
+    try {
+      app = initializeApp(firebaseConfig);
+      auth = getAuth(app);
+      db = getFirestore(app);
+
+      window.auth = auth;
+      window.db = db;
+      window.fbAuth = { signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut };
+      window.fs = { collection, doc, setDoc, getDoc, updateDoc, onSnapshot, query, orderBy, serverTimestamp };
+      
+      console.log("⚡ Firebase Auth & Firestore Connected!");
+
+      onAuthStateChanged(auth, async (user) => {
+        if (user) {
+          // ดึงข้อมูล Role ของ User จาก Firestore collection 'users'
+          try {
+            const userDocRef = doc(db, "users", user.uid);
+            const userSnap = await getDoc(userDocRef);
+            if (userSnap.exists()) {
+              window.currentUserProfile = userSnap.data();
+            } else {
+              window.currentUserProfile = { name: user.email, role: 'SALE' };
+            }
+          } catch (e) {
+            console.error("Error fetching user profile:", e);
+            window.currentUserProfile = { name: user.email, role: 'SALE' };
+          }
+          document.getElementById('login-modal').style.display = 'none';
+          document.getElementById('currentUserName').innerText = window.currentUserProfile.name || user.email;
+          document.getElementById('currentUserRoleTag').innerText = window.currentUserProfile.role;
+          applyRBACPermissions(window.currentUserProfile.role);
+          initRealtimeListener();
+        } else {
+          window.currentUserProfile = null;
+          document.getElementById('login-modal').style.display = 'flex';
+        }
+      });
+    } catch (e) {
+      console.warn("⚠️ Firebase Config ยังไม่ถูกตั้งค่าจริง");
+    }
+
+    function initRealtimeListener() {
+      if (!window.db) return;
+      const q = window.fs.query(window.fs.collection(window.db, "orders"), window.fs.orderBy("createdAt", "desc"));
+      window.fs.onSnapshot(q, (snapshot) => {
+        window.orders = [];
+        snapshot.forEach((docSnap) => {
+          window.orders.push({ id: docSnap.id, ...docSnap.data() });
+        });
+        if (window.renderApp) window.renderApp();
+      }, (error) => {
+        console.error("Firestore Listen Error:", error);
+      });
+    }
+  </script>
+</head>
+<body>
+
+  <!-- AUTHENTICATION MODAL (LOGIN / REGISTER) -->
+  <div id="login-modal" class="login-modal">
+    <div class="login-box">
+      <div class="login-header">
+        <i class="fa-solid fa-shield-halved login-logo"></i>
+        <h2>เข้าสู่ระบบ Order Workflow</h2>
+        <p>ยืนยันตัวตนด้วย Firebase Auth & Roles System</p>
+      </div>
+
+      <!-- TOGGLE TABS -->
+      <div class="auth-tabs" style="display: flex; gap: 10px; margin-bottom: 20px;">
+        <button type="button" class="btn btn-secondary active" id="tab-login" onclick="toggleAuthMode('login')" style="flex: 1;">เข้าสู่ระบบ</button>
+        <button type="button" class="btn btn-secondary" id="tab-register" onclick="toggleAuthMode('register')" style="flex: 1;">ลงทะเบียนผู้ใช้ใหม่</button>
+      </div>
+
+      <!-- LOGIN FORM -->
+      <form id="loginForm" onsubmit="handleAuthSubmit(event)">
+        <div class="form-group">
+          <label><i class="fa-solid fa-envelope"></i> อีเมล (Email)</label>
+          <input type="email" id="authEmail" class="form-control" placeholder="user@example.com" required />
+        </div>
+        <div class="form-group">
+          <label><i class="fa-solid fa-lock"></i> รหัสผ่าน (Password)</label>
+          <input type="password" id="authPassword" class="form-control" placeholder="อย่างน้อย 6 ตัวอักษร" required />
+        </div>
+
+        <!-- ADDITIONAL FIELDS FOR REGISTER -->
+        <div id="register-fields" class="hidden">
+          <div class="form-group">
+            <label><i class="fa-solid fa-id-card"></i> ชื่อ-นามสกุล ผู้ใช้งาน</label>
+            <input type="text" id="authName" class="form-control" placeholder="เช่น นายสมชาย สายชล" />
+          </div>
+          <div class="form-group">
+            <label><i class="fa-solid fa-user-gear"></i> กำหนดบทบาท (Role)</label>
+            <select id="authRole" class="form-control">
+              <option value="SALE">ฝ่ายขาย (Sale)</option>
+              <option value="SYSTEM">ระบบอัตโนมัติ (System)</option>
+              <option value="TECHNICIAN">ทีมช่างสนาม (Technician)</option>
+              <option value="BBIM">ทีมสนับสนุน (BBIM)</option>
+              <option value="ADMIN">ผู้ดูแลระบบ (Admin)</option>
+            </select>
+          </div>
+        </div>
+
+        <button type="submit" id="authSubmitBtn" class="btn btn-primary style-login-btn">
+          <i class="fa-solid fa-right-to-bracket"></i> เข้าสู่ระบบ (Login)
+        </button>
+      </form>
+    </div>
+  </div>
+
+  <!-- TOP HEADER -->
+  <header class="app-header">
+    <div class="logo-area">
+      <i class="fa-solid fa-fire logo-icon" style="color: #f59e0b;"></i>
+      <div>
+        <h1>ระบบจัดการกระบวนการคำสั่งซื้อ</h1>
+        <p>Order Workflow Management System (Firebase Auth & Firestore)</p>
+      </div>
+    </div>
+    
+    <!-- USER PROFILE & ROLE SWITCHER -->
+    <div class="user-profile-bar">
+      <div class="role-selector">
+        <span class="role-label"><i class="fa-solid fa-user-gear"></i> บทบาทสิทธิ์ใช้งาน:</span>
+        <div class="role-buttons">
+          <button class="role-btn role-sale-btn" id="btn-role-sale" onclick="switchRoleView('SALE')">
+            <i class="fa-solid fa-user-tag"></i> ฝ่ายขาย (Sale)
+          </button>
+          <button class="role-btn role-system-btn" id="btn-role-system" onclick="switchRoleView('SYSTEM')">
+            <i class="fa-solid fa-desktop"></i> ระบบอัตโนมัติ (System)
+          </button>
+          <button class="role-btn role-tech-btn" id="btn-role-tech" onclick="switchRoleView('TECHNICIAN')">
+            <i class="fa-solid fa-screwdriver-wrench"></i> ช่างสนาม (Technician)
+          </button>
+          <button class="role-btn role-bbim-btn" id="btn-role-bbim" onclick="switchRoleView('BBIM')">
+            <i class="fa-solid fa-headset"></i> สนับสนุน (BBIM)
+          </button>
+          <button class="role-btn role-admin-btn" id="btn-role-all" onclick="switchRoleView('ALL')">
+            <i class="fa-solid fa-layer-group"></i> ดูทั้งหมด (Master View)
+          </button>
+        </div>
+      </div>
+
+      <div class="user-info-box">
+        <div class="avatar-circle" id="userAvatar"><i class="fa-solid fa-user"></i></div>
+        <div>
+          <span class="user-fullname" id="currentUserName">ผู้ใช้งาน</span>
+          <span class="user-role-badge" id="currentUserRoleTag">Role</span>
+        </div>
+        <button class="btn btn-sm btn-logout" onclick="handleLogout()">
+          <i class="fa-solid fa-right-from-bracket"></i> ออกจากระบบ
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <div class="main-container">
+    
+    <!-- DASHBOARD STATS -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="stat-info">
+          <span class="stat-title">คำสั่งซื้อทั้งหมด</span>
+          <span class="stat-value" id="stat-total">0</span>
+        </div>
+        <div class="stat-icon bg-blue"><i class="fa-solid fa-boxes-stack"></i></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-info">
+          <span class="stat-title">พื้นที่เสี่ยงชายแดน (72 ตำบล)</span>
+          <span class="stat-value" id="stat-border">0</span>
+        </div>
+        <div class="stat-icon bg-orange"><i class="fa-solid fa-triangle-exclamation"></i></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-info">
+          <span class="stat-title">รอตรวจสอบ TamCI / Red Zone</span>
+          <span class="stat-value" id="stat-pending">0</span>
+        </div>
+        <div class="stat-icon bg-yellow"><i class="fa-solid fa-clock"></i></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-info">
+          <span class="stat-title">ติดตั้งสำเร็จ</span>
+          <span class="stat-value" id="stat-success">0</span>
+        </div>
+        <div class="stat-icon bg-green"><i class="fa-solid fa-circle-check"></i></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-info">
+          <span class="stat-title">ยกเลิก / ปฏิเสธ</span>
+          <span class="stat-value" id="stat-rejected">0</span>
+        </div>
+        <div class="stat-icon bg-red"><i class="fa-solid fa-circle-xmark"></i></div>
+      </div>
+    </div>
+
+    <!-- MAIN WORKSPACE -->
+    <div class="workspace-grid">
+      
+      <!-- LEFT COLUMN: ROLE ACTION PANEL -->
+      <div class="panel">
+        <div class="panel-header" id="panel-role-header">
+          <i class="fa-solid fa-user-tag"></i> ฝ่ายขาย (Sale) - ดำเนินการคำสั่งซื้อ
+        </div>
+        <div class="panel-body">
+          
+          <!-- SALE FORM -->
+          <div id="section-sale" class="role-section">
+            <h3 class="section-title"><i class="fa-solid fa-plus-circle"></i> 1. ลงทะเบียนคำสั่งซื้อใหม่ (Register Order)</h3>
+            <form id="orderForm" onsubmit="handleRegisterOrder(event)">
+              <div class="form-group">
+                <label>ชื่อ-นามสกุล ลูกค้า</label>
+                <input type="text" id="custName" class="form-control" placeholder="เช่น คุณสมชาย ใจดี" required />
+              </div>
+              <div class="form-group">
+                <label>เบอร์โทรศัพท์</label>
+                <input type="text" id="custPhone" class="form-control" placeholder="081-XXX-XXXX" required />
+              </div>
+              <div class="form-group">
+                <label>พื้นที่ติดตั้ง (เลือกตำบล)</label>
+                <select id="subDistrict" class="form-control" required>
+                  <option value="">-- เลือกตำบล --</option>
+                  <optgroup label="72 ตำบลพื้นที่เสี่ยงชายแดน (Border Area)">
+                    <option value="สุไหงโกลก (นราธิวาส)">สุไหงโกลก (นราธิวาส)</option>
+                    <option value="เบตง (ยะลา)">เบตง (ยะลา)</option>
+                    <option value="ตากใบ (นราธิวาส)">ตากใบ (นราธิวาส)</option>
+                    <option value="แม่สาย (เชียงราย)">แม่สาย (เชียงราย)</option>
+                    <option value="คลองใหญ่ (ตราด)">คลองใหญ่ (ตราด)</option>
+                  </optgroup>
+                  <optgroup label="พื้นที่ปกติ (Normal Area)">
+                    <option value="บางซื่อ (กรุงเทพฯ)">บางซื่อ (กรุงเทพฯ)</option>
+                    <option value="ปากเกร็ด (นนทบุรี)">ปากเกร็ด (นนทบุรี)</option>
+                    <option value="เมือง (เชียงใหม่)">เมือง (เชียงใหม่)</option>
+                    <option value="ศรีราชา (ชลบุรี)">ศรีราชา (ชลบุรี)</option>
+                  </optgroup>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>ที่อยู่ติดตั้งโดยละเอียด</label>
+                <textarea id="custAddress" class="form-control" rows="2" placeholder="บ้านเลขที่, ถนน, ซอย..." required></textarea>
+              </div>
+
+              <div class="support-box">
+                <h4><i class="fa-solid fa-circle-info"></i> เครื่องมือสนับสนุนการทำงาน (Need Support System):</h4>
+                <ul>
+                  <li><strong>FBB Workflow:</strong> ตั้งค่า Auto Remark สำหรับ 72 ตำบลเสี่ยง</li>
+                  <li><strong>TamCI:</strong> ส่งคำขอตรวจสอบพิกัดพื้นที่</li>
+                  <li><strong>SmartMap:</strong> ตรวจสอบพิกัดความถูกต้องบนแผนที่</li>
+                </ul>
+              </div>
+
+              <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 10px;">
+                <i class="fa-solid fa-paper-plane"></i> ลงทะเบียนคำสั่งซื้อ (Register Order -> Firestore)
+              </button>
+            </form>
+          </div>
+
+          <!-- SYSTEM PANEL -->
+          <div id="section-system" class="role-section hidden">
+            <h3 class="section-title"><i class="fa-solid fa-robot"></i> 2. การประมวลผลระบบอัตโนมัติ (System Automated Process)</h3>
+            <p class="text-muted">เลือก Order เพื่อจำลองการประมวลผลระบบอัตโนมัติ (Check Border Area 72 Sub District -> Add Flag -> Auto Remark -> FBSS Appointment -> Dispatch)</p>
+            <div id="system-action-container"></div>
+          </div>
+
+          <!-- TECHNICIAN PANEL -->
+          <div id="section-technician" class="role-section hidden">
+            <h3 class="section-title"><i class="fa-solid fa-helmet-safety"></i> 3. ดำเนินการโดยทีมช่างสนาม (Technician Workstation)</h3>
+            <p class="text-muted">กดรับงาน ตรวจสอบธงพื้นที่ชายแดน และบันทึกผลการติดตั้ง</p>
+            <div id="tech-action-container"></div>
+          </div>
+
+          <!-- BBIM PANEL -->
+          <div id="section-bbim" class="role-section hidden">
+            <h3 class="section-title"><i class="fa-solid fa-shield-halved"></i> 4. การตรวจสอบโดยทีมสนับสนุน (BBIM Verification)</h3>
+            <p class="text-muted">ตรวจสอบคำขอ TamCI, การขายข้ามโซน (Cross Zone) และอนุมัติ/ปฏิเสธพื้นที่ Red Zone</p>
+            <div id="bbim-action-container"></div>
+          </div>
+
+          <!-- ALL VIEW PANEL -->
+          <div id="section-all" class="role-section hidden">
+            <h3 class="section-title"><i class="fa-solid fa-sliders"></i> Master Command Panel</h3>
+            <p class="text-muted">คุณอยู่ในมุมมองภาพรวม สามารถคลิกเลือก Order ด้านขวาเพื่อดูประวัติการทำงานทั้งหมดได้</p>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN: ORDER TABLE & AUDIT LOG -->
+      <div class="panel">
+        <div class="panel-header">
+          <i class="fa-solid fa-table-list"></i> รายการคำสั่งซื้อในระบบ Real-time (Orders List)
+        </div>
+        <div class="panel-body">
+          <div style="overflow-x: auto;">
+            <table class="order-table">
+              <thead>
+                <tr>
+                  <th>เลขที่ Order</th>
+                  <th>ลูกค้า</th>
+                  <th>พื้นที่ / ตำบล</th>
+                  <th>ธงชายแดน</th>
+                  <th>สถานะปัจจุบัน</th>
+                  <th>การจัดการ</th>
+                </tr>
+              </thead>
+              <tbody id="orderTableBody"></tbody>
+            </table>
+          </div>
+
+          <!-- AUDIT LOG & ORDER DETAIL VIEW -->
+          <div style="margin-top: 24px;">
+            <h4 class="section-title" style="font-size: 15px;">
+              <i class="fa-solid fa-clock-rotate-left"></i> ประวัติการทำงานและ Audit Trail ของ Order: <span id="selected-order-id" style="color: var(--primary-color);">[กรุณาเลือก Order]</span>
+            </h4>
+            <div class="log-box" id="auditLogContainer">
+              <div class="log-item">
+                <span class="log-time">--:--</span>
+                <span class="log-role">SYSTEM</span>
+                <span class="log-text">กรุณาเลือกรายการ Order ด้านบนเพื่อดูประวัติการทำงานแบบเรียลไทม์</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script>
+    let authMode = 'login';
+    let currentRoleView = 'SALE';
+    let selectedOrderId = '';
+
+    const BORDER_DISTRICTS = [
+      "สุไหงโกลก (นราธิวาส)",
+      "เบตง (ยะลา)",
+      "ตากใบ (นราธิวาส)",
+      "แม่สาย (เชียงราย)",
+      "คลองใหญ่ (ตราด)"
+    ];
+
+    window.orders = [];
+
+    const STATUS_MAP = {
+      'REGISTERED': { text: 'ลงทะเบียนแล้ว', class: 'badge-blue' },
+      'PROSPECT_CREATED': { text: 'สร้าง Prospect แล้ว', class: 'badge-purple' },
+      'DISPATCHED': { text: 'ส่งงานให้ช่างแล้ว', class: 'badge-blue' },
+      'WAITING_TAMCI_VERIFY': { text: 'รออนุมัติ TamCI (BBIM)', class: 'badge-yellow' },
+      'READY_TO_INSTALL': { text: 'พร้อมติดตั้ง', class: 'badge-blue' },
+      'INSTALLED_SUCCESS': { text: 'ติดตั้งสำเร็จ', class: 'badge-green' },
+      'CANCELLED_CROSS_ZONE': { text: 'ยกเลิก (ขายข้ามโซน)', class: 'badge-red' },
+      'REJECTED_RED_ZONE': { text: 'ปฏิเสธ (พื้นที่ Red Zone)', class: 'badge-red' },
+      'REJECTED_LMR_SOA': { text: 'ปฏิเสธงาน (LMR/SOA)', class: 'badge-red' }
+    };
+
+    function toggleAuthMode(mode) {
+      authMode = mode;
+      const regFields = document.getElementById('register-fields');
+      const submitBtn = document.getElementById('authSubmitBtn');
+      const tabLogin = document.getElementById('tab-login');
+      const tabReg = document.getElementById('tab-register');
+
+      if (mode === 'register') {
+        regFields.classList.remove('hidden');
+        submitBtn.innerHTML = '<i class="fa-solid fa-user-plus"></i> ลงทะเบียน (Register)';
+        tabLogin.classList.remove('active');
+        tabReg.classList.add('active');
+      } else {
+        regFields.classList.add('hidden');
+        submitBtn.innerHTML = '<i class="fa-solid fa-right-to-bracket"></i> เข้าสู่ระบบ (Login)';
+        tabReg.classList.remove('active');
+        tabLogin.classList.add('active');
+      }
+    }
+
+    async function handleAuthSubmit(e) {
+      e.preventDefault();
+      const email = document.getElementById('authEmail').value.trim();
+      const password = document.getElementById('authPassword').value;
+
+      if (!window.auth || !window.fbAuth) {
+        alert("กรุณาตั้งค่า Firebase Config ในไฟล์ index.html ก่อนใช้งาน");
+        return;
+      }
+
+      if (authMode === 'login') {
+        try {
+          await window.fbAuth.signInWithEmailAndPassword(window.auth, email, password);
+        } catch (err) {
+          alert("เข้าสู่ระบบไม่สำเร็จ: " + err.message);
+        }
+      } else {
+        const name = document.getElementById('authName').value.trim();
+        const role = document.getElementById('authRole').value;
+        try {
+          const res = await window.fbAuth.createUserWithEmailAndPassword(window.auth, email, password);
+          // Save user profile & role to Firestore
+          await window.fs.setDoc(window.fs.doc(window.db, "users", res.user.uid), {
+            uid: res.user.uid,
+            email: email,
+            name: name || email,
+            role: role,
+            createdAt: window.fs.serverTimestamp()
+          });
+          alert("สมัครสมาชิกสำเร็จ!");
+        } catch (err) {
+          alert("สมัครสมาชิกไม่สำเร็จ: " + err.message);
+        }
+      }
+    }
+
+    async function handleLogout() {
+      if (window.auth && window.fbAuth) {
+        await window.fbAuth.signOut(window.auth);
+      }
+    }
+
+    function applyRBACPermissions(userRole) {
+      const allowedAll = userRole === 'ADMIN';
+      document.getElementById('btn-role-sale').style.display = (allowedAll || userRole === 'SALE') ? 'flex' : 'none';
+      document.getElementById('btn-role-system').style.display = (allowedAll || userRole === 'SYSTEM') ? 'flex' : 'none';
+      document.getElementById('btn-role-tech').style.display = (allowedAll || userRole === 'TECHNICIAN') ? 'flex' : 'none';
+      document.getElementById('btn-role-bbim').style.display = (allowedAll || userRole === 'BBIM') ? 'flex' : 'none';
+      document.getElementById('btn-role-all').style.display = allowedAll ? 'flex' : 'none';
+
+      const defaultView = allowedAll ? 'SALE' : userRole;
+      switchRoleView(defaultView);
+    }
+
+    function switchRoleView(role) {
+      currentRoleView = role;
+      document.querySelectorAll('.role-btn').forEach(btn => btn.classList.remove('active'));
+      const activeBtnMap = { 'SALE': 'btn-role-sale', 'SYSTEM': 'btn-role-system', 'TECHNICIAN': 'btn-role-tech', 'BBIM': 'btn-role-bbim', 'ALL': 'btn-role-all' };
+      if (document.getElementById(activeBtnMap[role])) document.getElementById(activeBtnMap[role]).classList.add('active');
+
+      const headers = {
+        'SALE': '<i class="fa-solid fa-user-tag"></i> ฝ่ายขาย (Sale) - ดำเนินการคำสั่งซื้อ',
+        'SYSTEM': '<i class="fa-solid fa-desktop"></i> ระบบอัตโนมัติ (System) - ประมวลผล Workflow',
+        'TECHNICIAN': '<i class="fa-solid fa-screwdriver-wrench"></i> ทีมช่างสนาม (Technician) - ดำเนินงานติดตั้ง',
+        'BBIM': '<i class="fa-solid fa-headset"></i> ทีมสนับสนุน (BBIM) - ตรวจสอบ TamCI & Red Zone',
+        'ALL': '<i class="fa-solid fa-layer-group"></i> Master View - ภาพรวมทุกขั้นตอน'
+      };
+      document.getElementById('panel-role-header').innerHTML = headers[role];
+
+      document.querySelectorAll('.role-section').forEach(sec => sec.classList.add('hidden'));
+      if (role === 'SALE') document.getElementById('section-sale').classList.remove('hidden');
+      else if (role === 'SYSTEM') document.getElementById('section-system').classList.remove('hidden');
+      else if (role === 'TECHNICIAN') document.getElementById('section-technician').classList.remove('hidden');
+      else if (role === 'BBIM') document.getElementById('section-bbim').classList.remove('hidden');
+      else if (role === 'ALL') document.getElementById('section-all').classList.remove('hidden');
+
+      window.renderApp();
+    }
+
+    window.renderApp = function() {
+      updateStats();
+      renderTable();
+      renderRolePanels();
+      renderAuditLogs();
+    };
+
+    function updateStats() {
+      const list = window.orders || [];
+      document.getElementById('stat-total').innerText = list.length;
+      document.getElementById('stat-border').innerText = list.filter(o => o.isBorderArea).length;
+      document.getElementById('stat-pending').innerText = list.filter(o => o.status === 'WAITING_TAMCI_VERIFY').length;
+      document.getElementById('stat-success').innerText = list.filter(o => o.status === 'INSTALLED_SUCCESS').length;
+      document.getElementById('stat-rejected').innerText = list.filter(o => ['CANCELLED_CROSS_ZONE', 'REJECTED_RED_ZONE', 'REJECTED_LMR_SOA'].includes(o.status)).length;
+    }
+
+    function renderTable() {
+      const tbody = document.getElementById('orderTableBody');
+      tbody.innerHTML = '';
+      const list = window.orders || [];
+
+      if (list.length > 0 && !selectedOrderId) {
+        selectedOrderId = list[0].id;
+      }
+
+      list.forEach(order => {
+        const isSelected = order.id === selectedOrderId;
+        const statusInfo = STATUS_MAP[order.status] || { text: order.status, class: 'badge-gray' };
+        
+        const tr = document.createElement('tr');
+        if (isSelected) tr.classList.add('selected');
+        tr.onclick = () => selectOrder(order.id);
+
+        tr.innerHTML = `
+          <td><strong>${order.id}</strong></td>
+          <td>${order.customer}</td>
+          <td>${order.subDistrict}</td>
+          <td>${order.isBorderArea ? '<span class="badge badge-orange"><i class="fa-solid fa-flag"></i> 72 ตำบลเสี่ยง</span>' : '<span class="badge badge-gray">ปกติ</span>'}</td>
+          <td><span class="badge ${statusInfo.class}">${statusInfo.text}</span></td>
+          <td>
+            <button class="btn btn-sm btn-secondary" onclick="selectOrder('${order.id}')">
+              <i class="fa-solid fa-eye"></i> ดูข้อมูล
+            </button>
+          </td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    function selectOrder(id) {
+      selectedOrderId = id;
+      renderTable();
+      renderRolePanels();
+      renderAuditLogs();
+    }
+
+    function renderRolePanels() {
+      const list = window.orders || [];
+      const selectedOrder = list.find(o => o.id === selectedOrderId);
+      
+      const sysContainer = document.getElementById('system-action-container');
+      if (selectedOrder) {
+        sysContainer.innerHTML = `
+          <div style="background: var(--bg-light); padding: 16px; border-radius: 6px; border: 1px solid var(--border-color);">
+            <h4>Order ที่เลือก: ${selectedOrder.id} (${selectedOrder.customer})</h4>
+            <p><strong>การตรวจพื้นที่ 72 ตำบล:</strong> ${selectedOrder.isBorderArea ? '<span style="color:var(--orange-color); font-weight:600;">ติดธงพื้นที่ชายแดน (Add Border Area Flag)</span>' : 'พื้นที่ปกติ'}</p>
+            <p><strong>Auto Remark:</strong> ${selectedOrder.systemRemark}</p>
+            <p><strong>สถานะ FBSS:</strong> ${selectedOrder.fbssAppointed ? 'นัดหมายสำเร็จ' : 'ยังไม่นัดหมาย'}</p>
+            <div style="margin-top: 12px;">
+              ${selectedOrder.status === 'REGISTERED' ? `
+                <button class="btn btn-primary" onclick="processSystemFlow('${selectedOrder.id}')">
+                  <i class="fa-solid fa-gears"></i> ประมวลผลสร้าง Prospect & Dispatch งาน
+                </button>
+              ` : `<span class="badge badge-green"><i class="fa-solid fa-check"></i> ระบบประมวลผลขั้นตอน Dispatch เรียบร้อยแล้ว</span>`}
+            </div>
+          </div>
+        `;
+      } else {
+        sysContainer.innerHTML = '<p class="text-muted">กรุณาเลือก Order จากตารางเพื่อประมวลผล</p>';
+      }
+
+      const techContainer = document.getElementById('tech-action-container');
+      if (selectedOrder) {
+        let techActionsHtml = '';
+        if (!selectedOrder.dispatched) {
+          techActionsHtml = `<p class="badge badge-yellow">รอกระบวนการ Dispatch จากระบบ</p>`;
+        } else if (selectedOrder.status === 'DISPATCHED' || selectedOrder.status === 'PROSPECT_CREATED') {
+          techActionsHtml = `
+            <button class="btn btn-primary" onclick="handleTechAcceptJob('${selectedOrder.id}')">
+              <i class="fa-solid fa-hand-holding-hand"></i> ช่างกดรับงาน (Accept Job)
+            </button>
+          `;
+        } else if (selectedOrder.status === 'WAITING_TAMCI_VERIFY') {
+          techActionsHtml = `<div class="badge badge-yellow" style="padding: 10px; width:100%;"><i class="fa-solid fa-hourglass-half"></i> ส่งคำขอ Request Verify via TamCI เรียบร้อยแล้ว -> รอ BBIM อนุมัติ</div>`;
+        } else if (selectedOrder.status === 'READY_TO_INSTALL') {
+          techActionsHtml = `
+            <div style="display: flex; gap: 10px;">
+              <button class="btn btn-success" onclick="handleTechComplete('${selectedOrder.id}', true)">
+                <i class="fa-solid fa-wrench"></i> ติดตั้งสำเร็จ (Installation Complete)
+              </button>
+              <button class="btn btn-danger" onclick="handleTechComplete('${selectedOrder.id}', false)">
+                <i class="fa-solid fa-xmark"></i> ปฏิเสธการติดตั้ง (Reject LMR/SOA)
+              </button>
+            </div>
+          `;
+        } else {
+          techActionsHtml = `<p class="text-muted">คำสั่งซื้อนี้สิ้นสุดกระบวนการแล้ว (${selectedOrder.status})</p>`;
+        }
+
+        techContainer.innerHTML = `
+          <div style="background: var(--bg-light); padding: 16px; border-radius: 6px; border: 1px solid var(--border-color);">
+            <h4>คำสั่งซื้อ: ${selectedOrder.id}</h4>
+            <p><strong>ที่อยู่ติดตั้ง:</strong> ${selectedOrder.address}</p>
+            <p><strong>ธงพื้นที่ชายแดน:</strong> ${selectedOrder.isBorderArea ? '<span style="color:red; font-weight:bold;">มีธงเสี่ยงชายแดน</span>' : 'ไม่มี'}</p>
+            <div style="margin-top: 15px;">${techActionsHtml}</div>
+          </div>
+        `;
+      } else {
+        techContainer.innerHTML = '<p class="text-muted">กรุณาเลือก Order จากตาราง</p>';
+      }
+
+      const bbimContainer = document.getElementById('bbim-action-container');
+      if (selectedOrder) {
+        let bbimHtml = '';
+        if (selectedOrder.status === 'WAITING_TAMCI_VERIFY') {
+          bbimHtml = `
+            <div style="background: #fffbe6; padding: 12px; border-radius: 6px; border: 1px solid #ffe58f; margin-bottom: 12px;">
+              <strong><i class="fa-solid fa-shield-cat"></i> รายการต้องตรวจสอบโดย BBIM (TamCI):</strong>
+              <p style="margin-top: 5px;">มีการส่งคำขอ Request Verify via TamCI จากช่างเนื่องจากติดธง 72 ตำบลเสี่ยง</p>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+              <button class="btn btn-danger" onclick="handleBBIMDecision('${selectedOrder.id}', 'CROSS_ZONE')">
+                <i class="fa-solid fa-ban"></i> พบขายข้ามโซน (Sale Cross Zone) -> Cancel Order
+              </button>
+              <button class="btn btn-warning" onclick="handleBBIMDecision('${selectedOrder.id}', 'RED_ZONE')">
+                <i class="fa-solid fa-triangle-exclamation"></i> อยู่ใน Red Zone -> Reject Installation
+              </button>
+              <button class="btn btn-success" onclick="handleBBIMDecision('${selectedOrder.id}', 'APPROVE')">
+                <i class="fa-solid fa-circle-check"></i> พิกัดปลอดภัย -> อนุมัติการติดตั้ง (Approve Installation)
+              </button>
+            </div>
+          `;
+        } else {
+          bbimHtml = `<p class="text-muted">Order นี้ไม่ได้อยู่ในสถานะรอตรวจสอบโดย BBIM (สถานะปัจจุบัน: ${selectedOrder.status})</p>`;
+        }
+
+        bbimContainer.innerHTML = `
+          <div style="background: var(--bg-light); padding: 16px; border-radius: 6px; border: 1px solid var(--border-color);">
+            <h4>คำสั่งซื้อสำหรับตรวจสอบ: ${selectedOrder.id}</h4>
+            <p><strong>ลูกค้า:</strong> ${selectedOrder.customer} (${selectedOrder.subDistrict})</p>
+            <div style="margin-top: 15px;">${bbimHtml}</div>
+          </div>
+        `;
+      } else {
+        bbimContainer.innerHTML = '<p class="text-muted">กรุณาเลือก Order จากตาราง</p>';
+      }
+    }
+
+    function renderAuditLogs() {
+      const container = document.getElementById('auditLogContainer');
+      const orderIdSpan = document.getElementById('selected-order-id');
+      const list = window.orders || [];
+      const selectedOrder = list.find(o => o.id === selectedOrderId);
+
+      if (!selectedOrder) {
+        orderIdSpan.innerText = '[กรุณาเลือก Order]';
+        container.innerHTML = '<div class="log-item"><span class="log-text">ไม่มีข้อมูล</span></div>';
+        return;
+      }
+
+      orderIdSpan.innerText = selectedOrder.id + ' (' + selectedOrder.customer + ')';
+      container.innerHTML = '';
+
+      (selectedOrder.logs || []).forEach(log => {
+        const item = document.createElement('div');
+        item.className = 'log-item';
+        item.innerHTML = `
+          <span class="log-time">${log.time}</span>
+          <span class="log-role role-${(log.role || '').toLowerCase()}">${log.role}</span>
+          <span class="log-text">${log.text}</span>
+        `;
+        container.appendChild(item);
+      });
+    }
+
+    async function handleRegisterOrder(e) {
+      e.preventDefault();
+      const name = document.getElementById('custName').value;
+      const phone = document.getElementById('custPhone').value;
+      const subDist = document.getElementById('subDistrict').value;
+      const addr = document.getElementById('custAddress').value;
+
+      const isBorder = BORDER_DISTRICTS.includes(subDist);
+      const newId = `ORD-2026-00${(window.orders || []).length + 1}`;
+      const timeNow = new Date().toISOString().replace('T', ' ').substring(0, 16);
+
+      const currentUser = window.currentUserProfile || { name: 'Sale' };
+
+      const newOrder = {
+        id: newId,
+        customer: name,
+        phone: phone,
+        address: addr,
+        subDistrict: subDist,
+        isBorderArea: isBorder,
+        status: "REGISTERED",
+        systemRemark: isBorder ? "พื้นที่เสี่ยงชายแดน กรุณาขออนุมัติผ่าน TamCI ก่อนติดตั้ง" : "-",
+        fbssAppointed: false,
+        dispatched: false,
+        techAccepted: false,
+        isCrossZone: false,
+        isRedZone: false,
+        logs: [
+          { time: timeNow, role: "SALE", text: `ลงทะเบียนคำสั่งซื้อใหม่โดย ${currentUser.name}` }
+        ]
+      };
+
+      if (isBorder) {
+        newOrder.logs.push({ time: timeNow, role: "SYSTEM", text: "ตรวจพบ 72 ตำบลเสี่ยงชายแดน -> เพิ่มธง [Add Border Area Flag]" });
+      }
+
+      if (window.db && window.fs) {
+        try {
+          await window.fs.setDoc(window.fs.doc(window.db, "orders", newId), {
+            ...newOrder,
+            createdAt: window.fs.serverTimestamp()
+          });
+        } catch (err) {
+          console.error("Firestore Save Error:", err);
+        }
+      }
+
+      selectedOrderId = newId;
+      document.getElementById('orderForm').reset();
+      processSystemFlow(newId);
+    }
+
+    async function processSystemFlow(orderId) {
+      const list = window.orders || [];
+      const order = list.find(o => o.id === orderId);
+      if (!order) return;
+
+      const timeNow = new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const newLogs = [...(order.logs || [])];
+
+      if (order.isBorderArea) {
+        newLogs.push({ time: timeNow, role: "SYSTEM", text: `สร้าง Prospect ใน FBB Workflow พร้อม Remark: "${order.systemRemark}"` });
+      } else {
+        newLogs.push({ time: timeNow, role: "SYSTEM", text: "สร้าง Prospect ใน FBB Workflow (พื้นที่ปกติ)" });
+      }
+      newLogs.push({ time: timeNow, role: "SYSTEM", text: "ทำนัดหมายบน FBSS และ Dispatch งานให้ทีมช่างเรียบร้อยแล้ว" });
+
+      if (window.db && window.fs) {
+        await window.fs.updateDoc(window.fs.doc(window.db, "orders", orderId), {
+          status: "DISPATCHED",
+          fbssAppointed: true,
+          dispatched: true,
+          logs: newLogs
+        });
+      }
+    }
+
+    async function handleTechAcceptJob(orderId) {
+      const list = window.orders || [];
+      const order = list.find(o => o.id === orderId);
+      if (!order) return;
+
+      const timeNow = new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const newLogs = [...(order.logs || []), { time: timeNow, role: "TECHNICIAN", text: "ช่างกดรับงานติดตั้ง (Accept Job)" }];
+      let newStatus = "READY_TO_INSTALL";
+
+      if (order.isBorderArea) {
+        newStatus = "WAITING_TAMCI_VERIFY";
+        newLogs.push({ time: timeNow, role: "TECHNICIAN", text: "ตรวจพบธงพื้นที่ชายแดน (Border Area Flag = Yes) -> ส่งคำขอ Request Verify via TamCI ถึงทีม BBIM" });
+      } else {
+        newLogs.push({ time: timeNow, role: "TECHNICIAN", text: "ตรวจสอบธงพื้นที่ชายแดน = No -> ปลดล็อกพร้อมสำหรับการติดตั้ง (Installation)" });
+      }
+
+      if (window.db && window.fs) {
+        await window.fs.updateDoc(window.fs.doc(window.db, "orders", orderId), {
+          status: newStatus,
+          techAccepted: true,
+          logs: newLogs
+        });
+      }
+    }
+
+    async function handleTechComplete(orderId, isSuccess) {
+      const list = window.orders || [];
+      const order = list.find(o => o.id === orderId);
+      if (!order) return;
+
+      const timeNow = new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const newLogs = [...(order.logs || [])];
+      let newStatus = isSuccess ? "INSTALLED_SUCCESS" : "REJECTED_LMR_SOA";
+
+      if (isSuccess) {
+        newLogs.push({ time: timeNow, role: "TECHNICIAN", text: "ดำเนินการติดตั้งสัญญาณและอุปกรณ์เรียบร้อยแล้ว (Installation Success -> End)" });
+      } else {
+        newLogs.push({ time: timeNow, role: "TECHNICIAN", text: "ปฏิเสธการติดตั้งเนื่องจากปัญหาช่าง/หน้างาน (Reject LMR/SOA -> End)" });
+      }
+
+      if (window.db && window.fs) {
+        await window.fs.updateDoc(window.fs.doc(window.db, "orders", orderId), {
+          status: newStatus,
+          logs: newLogs
+        });
+      }
+    }
+
+    async function handleBBIMDecision(orderId, decision) {
+      const list = window.orders || [];
+      const order = list.find(o => o.id === orderId);
+      if (!order) return;
+
+      const timeNow = new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const currentUser = window.currentUserProfile || { name: 'BBIM' };
+      const newLogs = [...(order.logs || []), { time: timeNow, role: "BBIM", text: `ทีม BBIM (${currentUser.name}) รับงานตรวจสอบผ่าน TamCI` }];
+      let newStatus = "READY_TO_INSTALL";
+      let isCross = false;
+      let isRed = false;
+
+      if (decision === 'CROSS_ZONE') {
+        newStatus = "CANCELLED_CROSS_ZONE";
+        isCross = true;
+        newLogs.push({ time: timeNow, role: "BBIM", text: "ตรวจสอบพบเป็นการขายข้ามโซน (Sale Cross Zone = Yes) -> Cancel Order (End)" });
+      } else if (decision === 'RED_ZONE') {
+        newStatus = "REJECTED_RED_ZONE";
+        isRed = true;
+        newLogs.push({ time: timeNow, role: "BBIM", text: "ตรวจสอบพบอยู่ในโซนสีแดง (Location in Red Zone = Yes) -> Reject Installation" });
+      } else if (decision === 'APPROVE') {
+        newStatus = "READY_TO_INSTALL";
+        newLogs.push({ time: timeNow, role: "BBIM", text: "ตรวจสอบปลอดภัย (Location in Red Zone = No) -> Approve Installation ส่งงานกลับให้ช่าง" });
+      }
+
+      if (window.db && window.fs) {
+        await window.fs.updateDoc(window.fs.doc(window.db, "orders", orderId), {
+          status: newStatus,
+          isCrossZone: isCross,
+          isRedZone: isRed,
+          logs: newLogs
+        });
+      }
+    }
+  </script>
+</body>
+</html>
